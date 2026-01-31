@@ -1,0 +1,22 @@
+{
+  "name": "gbcserver",
+  "version": "1.0.0",
+  "description": "Minecraft 服务器综合管理系统",
+  "main": "whiteHitBlack.js",
+  "scripts": {
+    "start": "node whiteHitBlack.js",
+    "dev": "node whiteHitBlack.js",
+    "autorefers": "node serverAutoRefers.js",
+    "uuid": "python3 getUuid.py"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "express": "^4.18.3",
+    "nodemailer": "^6.9.13",
+    "speakeasy": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
