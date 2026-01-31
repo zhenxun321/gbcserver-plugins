@@ -17,8 +17,9 @@
     "totpSecret": "BASE32_TOTP_SECRET"
   },
   "tls": {
-    "keyPath": "server.key",
-    "certPath": "server.pem"
+    "enable": false,
+    "keyPath": "/tls/server.key",
+    "certPath": "/tls/server.pem"
   },
   "plugin": {
     "allowlist": [
@@ -39,8 +40,11 @@
     }
   ],
   "ports": {
-    "http": 80,
-    "https": 443,
+    "http": 8080,
+    "https": 8443,
     "plugin": 8094
+  },
+  "runtime": {
+    "dataDir": "/data"
   }
 }

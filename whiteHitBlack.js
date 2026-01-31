@@ -13,6 +13,10 @@ const speakeasy = require('speakeasy');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
 
+// 运行时数据目录（默认当前目录）。建议在容器/生产环境中挂载一个持久化目录。
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+function dataPath(filename){ return path.join(DATA_DIR, filename); }
+
 // =============================
 // 配置加载（优先级：环境变量 > config.json > 默认值）
 // =============================
@@ -59,12 +63,14 @@ function genRandomPassword(len = 16) {
 
 
 const EMAIL_LOGO_URL = cfg('mail.logoUrl', '');
-const whitelistFile = "whitelist.json";
-const whitedataFile = "whitedata.json";
-const adminFile = "admin.json";
-const signDataFile = "signData.json";
-const shopItemsFile = "shopItems.json";
-const couponsFile = "coupons.json";
+const TLS_KEYPATH = cfg('tls.keyPath', 'server.key');
+const TLS_CERTPATH = cfg('tls.certPath', 'server.pem');
+const whitelistFile = dataPath("whitelist.json");
+const whitedataFile = dataPath("whitedata.json");
+const adminFile = dataPath("admin.json");
+const signDataFile = dataPath("signData.json");
+const shopItemsFile = dataPath("shopItems.json");
+const couponsFile = dataPath("coupons.json");
 const serverStatusCache = new Map();
 const SERVER_TOKEN = cfg('server.token', '');
 const net = require('net');
@@ -183,14 +189,14 @@ if (!fs.existsSync(couponsFile)) {
     fs.writeFileSync(couponsFile, "[]");
     console.log(`已创建兑换码数据文件: ${couponsFile}`);
 }
-// 邮件配置
+// 邮件配置（全部可通过环境变量 / config.json 覆盖）
 const transporter = nodemailer.createTransport({
-    host: 'smtp.exmail.qq.com',
-    port: 465,
-    secure: true,
+    host: cfg('mail.host', 'smtp.example.com'),
+    port: parseInt(cfg('mail.port', '465'), 10),
+    secure: String(cfg('mail.secure', 'true')).toLowerCase() === 'true',
     auth: {
-        user: '',
-        pass: ''
+        user: cfg('mail.user', ''),
+        pass: cfg('mail.pass', '')
     },
 });
 
@@ -241,7 +247,7 @@ async function sendVerificationEmail(email, code) {
                 <div class="container">
                     <div class="header">
                         <img src="${EMAIL_LOGO_URL}" alt="服务器Logo" class="logo">
-                        <h1>嘎嘣脆の小服</h1>
+                        <h1>${cfg('mail.brandName', 'Minecraft 服务器管理系统')}</h1>
                     </div>
                     
                     <p>尊敬的玩家，您的验证码为：</p>
@@ -250,7 +256,7 @@ async function sendVerificationEmail(email, code) {
                     
                     <div class="footer">
                         <p>此为系统自动发送邮件，请勿回复</p>
-                        <p>© ${new Date().getFullYear()} 嘎嘣脆服务器官方</p>
+                        <p>© ${new Date().getFullYear()} ${cfg('mail.footerText','Minecraft 服务器管理系统')}</p>
                     </div>
                 </div>
             </body>
@@ -1810,10 +1816,22 @@ app.all('/api', async (req, res) => {
     }
 });
 
-// 创建HTTPS服务器
-https.createServer(httpsOptions, app).listen(parseInt(cfg('ports.https', '443'), 10), () => {
-    console.log(`HTTPS服务器运行在端口 ${cfg("ports.https","443")}`);
-});
+// 创建 HTTPS 服务器（可选：如果没有证书文件则不会启动 HTTPS）
+try {
+  if (fs.existsSync(TLS_KEYPATH) && fs.existsSync(TLS_CERTPATH)) {
+    const httpsOptions = {
+      key: fs.readFileSync(TLS_KEYPATH),
+      cert: fs.readFileSync(TLS_CERTPATH)
+    };
+    https.createServer(httpsOptions, app).listen(parseInt(cfg('ports.https', '443'), 10), () => {
+      console.log(`HTTPS 服务器运行在端口 ${cfg('ports.https','443')}`);
+    });
+  } else {
+    console.warn('[WARN] 未找到 TLS 证书文件，已跳过 HTTPS 启动。你仍可通过 HTTP 或使用反向代理终止 TLS。');
+  }
+} catch (e) {
+  console.warn('[WARN] HTTPS 启动失败（已跳过）：', e.message);
+}
 
 http.createServer(app).listen(parseInt(cfg('ports.http', '80'), 10), () => {
     console.log(`HTTP服务器运行在端口 ${cfg("ports.http","80")}`);
