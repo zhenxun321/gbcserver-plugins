@@ -19,7 +19,6 @@
 > - Linux：Docker Engine + docker compose 插件
 
 ### 1) 下载代码
-两种方式任选其一：
 
 **下载 zip**  
 解压到任意目录即可。
