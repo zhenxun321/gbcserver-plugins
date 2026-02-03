@@ -3,6 +3,147 @@ const http = require("http");
 const https = require("https");
 const fs = require("fs");
 const path = require('path');
+const crypto = require('crypto');
+
+// -------------------- 配置加载 --------------------
+const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, 'config.json');
+
+
+function isPlainObject(v) {
+  return v && typeof v === 'object' && !Array.isArray(v);
+}
+function deepMerge(base, extra) {
+  const out = { ...base };
+  for (const [k, v] of Object.entries(extra || {})) {
+    if (isPlainObject(v) && isPlainObject(out[k])) out[k] = deepMerge(out[k], v);
+    else out[k] = v;
+  }
+  return out;
+}
+
+// 代码内置默认值
+const DEFAULT_CONFIG = {
+  email: {
+    logoUrl: "https://image.010831.xyz/gbc/icon.jpg"
+  },
+  files: {
+    whitelist: "whitelist.json",
+    whitedata: "whitedata.json",
+    admin: "admin.json",
+    signData: "signData.json",
+    shopItems: "shopItems.json",
+    coupons: "coupons.json"
+  },
+  http: {
+    bodyLimit: "10mb",
+    staticDir: "public",
+    httpPort: 80,
+    httpsPort: 443,
+    pluginPort: 8094
+  },
+  tls: {
+    keyPath: "server.key",
+    certPath: "server.pem"
+  },
+  game: {
+    maxOnlineTimeMs: 1000 * 60 * 60 * 24 * 31 * 12 * 100,
+    onlineMode: false
+  },
+  admin: {
+    default: {
+      username: "admin",
+      password: "admin123",
+      totpSecret: "GSEWY3DPEHPK3DHJ"
+    }
+  },
+  mail: {
+    host: "smtp.exmail.qq.com",
+    port: 465,
+    secure: true,
+    auth: {
+      user: "CHANGE_ME@example.com",
+      pass: "CHANGE_ME" 
+    },
+    fromName: "嘎嘣脆服务器官方",
+    fromAddress: "CHANGE_ME@example.com",
+    verificationSubject: "邮箱验证"
+  },
+  security: {
+    serverToken: "mikumiku",
+    verificationCodeTtlMs: 5 * 60 * 1000,
+    adminSessionTtlMs: 60 * 60 * 1000,
+    webSessionTtlMs: 60 * 60 * 1000,
+    sessionBinding: {
+      admin: { ip: false, ua: false },
+      web: { ip: false, ua: false }
+    }
+  },
+  storage: {
+    avatarsDir: "avatars",
+    maxAvatarBytes: 10 * 1024 * 1024,
+    portsFile: "ports.json"
+  },
+  webhook: {
+    updatePortPath: "/webhook/update-port"
+  },
+  status: {
+    // 服务器列表移到配置中，后端会读取这里
+    servers: [
+      { name: "电信线路", host: "v4.242774835.xyz", defaultPort: 1259 },
+      { name: "移动线路", host: "ipv4.242774835.xyz", defaultPort: 55917 },
+      { name: "移动IPv6", host: "mc.242774835.xyz", defaultPort: 25565 },
+      { name: "电信IPv6", host: "ipv6.242774835.xyz", defaultPort: 25565 },
+      { name: "miku服务器中转", host: "server.242774835.xyz", defaultPort: 10060 }
+    ],
+    maxRetries: 3,
+    fetchTimeoutMs: 5000,
+cacheTtlMs: 25000
+  },
+  shop: {
+    couponLength: 10,
+    couponValidityMs: 3 * 24 * 60 * 60 * 1000
+  },
+  sign: {
+    timezoneOffsetHours: 8 // 北京时间 UTC+8
+  },
+  plugin: {
+    allowedIPs: [
+      "192.168.2.230",
+      "192.168.10.8",
+      "::ffff:192.168.10.8",
+      "::ffff:192.168.2.230"
+    ]
+  }
+};
+
+function loadConfig() {
+  let cfg = DEFAULT_CONFIG;
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+      const userCfg = JSON.parse(raw);
+      cfg = deepMerge(DEFAULT_CONFIG, userCfg);
+    } else {
+      // 自动生成一份示例配置，方便首次启动
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
+      console.log(`已生成默认配置文件: ${CONFIG_PATH}，请按需修改后重新启动服务`);
+      process.exit(0);
+    }
+  } catch (e) {
+    console.error("读取/解析配置文件失败，将使用默认配置:", e);
+  }
+
+  // 用环境变量覆盖敏感项（可选，但强烈推荐）
+  if (process.env.SMTP_USER) cfg.mail.auth.user = process.env.SMTP_USER;
+  if (process.env.SMTP_PASS) cfg.mail.auth.pass = process.env.SMTP_PASS;
+  if (process.env.SERVER_TOKEN) cfg.security.serverToken = process.env.SERVER_TOKEN;
+
+  return cfg;
+}
+
+const config = loadConfig();
+// -------------------- 配置加载结束 --------------------
+
 const playerSessions = new Map();
 const webSessions = new Map();
 const sub_process = require('child_process');
@@ -11,69 +152,14 @@ const exec = promisify(sub_process.exec);
 const nodemailer = require('nodemailer');
 const speakeasy = require('speakeasy');
 const bodyParser = require('body-parser');
-const crypto = require('crypto');
-
-// 运行时数据目录（默认当前目录）。建议在容器/生产环境中挂载一个持久化目录。
-const DATA_DIR = process.env.DATA_DIR || __dirname;
-function dataPath(filename){ return path.join(DATA_DIR, filename); }
-
-// =============================
-// 配置加载（优先级：环境变量 > config.json > 默认值）
-// =============================
-const CONFIG_PATH = process.env.CONFIG_PATH || 'config.json';
-
-let fileConfig = {};
-try {
-  if (fs.existsSync(CONFIG_PATH)) {
-    fileConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-  }
-} catch (e) {
-  console.warn('[WARN] 读取 config.json 失败，将使用环境变量/默认值：', e.message);
-}
-
-function cfg(key, defaultValue) {
-  // key 支持 'a.b.c'
-  const fromEnv = process.env[key.toUpperCase().replace(/\./g, '_')];
-  if (fromEnv !== undefined) return fromEnv;
-
-  const seg = key.split('.');
-  let cur = fileConfig;
-  for (const s of seg) {
-    if (cur && Object.prototype.hasOwnProperty.call(cur, s)) cur = cur[s];
-    else { cur = undefined; break; }
-  }
-  return (cur === undefined || cur === null || cur === '') ? defaultValue : cur;
-}
-
-function cfgJson(key, defaultValue) {
-  const v = cfg(key, undefined);
-  if (v === undefined) return defaultValue;
-  if (typeof v === 'string') {
-    try { return JSON.parse(v); } catch { return defaultValue; }
-  }
-  return v;
-}
-
-function genRandomPassword(len = 16) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=';
-  let out = '';
-  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
-}
-
-
-const EMAIL_LOGO_URL = cfg('mail.logoUrl', '');
-const TLS_KEYPATH = cfg('tls.keyPath', 'server.key');
-const TLS_CERTPATH = cfg('tls.certPath', 'server.pem');
-const whitelistFile = dataPath("whitelist.json");
-const whitedataFile = dataPath("whitedata.json");
-const adminFile = dataPath("admin.json");
-const signDataFile = dataPath("signData.json");
-const shopItemsFile = dataPath("shopItems.json");
-const couponsFile = dataPath("coupons.json");
+const EMAIL_LOGO_URL = config.email.logoUrl;
+const whitelistFile = config.files.whitelist;
+const whitedataFile = config.files.whitedata;
+const signDataFile = config.files.signData;
+const shopItemsFile = config.files.shopItems;
+const couponsFile = config.files.coupons;
 const serverStatusCache = new Map();
-const SERVER_TOKEN = cfg('server.token', '');
-const net = require('net');
+const SERVER_TOKEN = config.security.serverToken;
 const STATUS_APIS = [
     {
         name: 'api.mcsrvstat.us',
@@ -136,30 +222,26 @@ const STATUS_APIS = [
 ];
 // 创建Express应用
 const app = express();
-app.use(bodyParser.json({ limit: '10mb' }));
-app.use(express.static(path.join(__dirname, 'public'))); // 使用静态目录public
+app.use(bodyParser.json({ limit: config.http.bodyLimit }));
+app.use(express.static(path.join(__dirname, config.http.staticDir))); // 使用静态目录public
 
-const maxOnlineTime = 1000 * 60 * 60 * 24 * 31 * 12 * 100;
-const onlineMode = false;
+const maxOnlineTime = config.game.maxOnlineTimeMs;
+const onlineMode = config.game.onlineMode;
 
-// 确保admin.json文件存在并初始化（⚠️开源版不写死默认密码/密钥）
-if (!fs.existsSync(adminFile)) {
-    const defaultUser = cfg('admin.username', 'admin');
-    const defaultPass = cfg('admin.password', genRandomPassword(18));
-    const defaultSecret = cfg('admin.totpSecret', speakeasy.generateSecret({ length: 20 }).base32);
-
-    fs.writeFileSync(adminFile, JSON.stringify({
-        username: defaultUser,
-        password: defaultPass,
-        totpSecret: defaultSecret
-    }, null, 2));
-
-    console.log(`已创建管理员配置文件: ${adminFile}`);
-    console.log(`[IMPORTANT] 初始管理员账号: ${defaultUser}`);
-    console.log(`[IMPORTANT] 初始管理员密码: ${defaultPass}`);
-    console.log(`[IMPORTANT] 初始TOTP Secret(Base32): ${defaultSecret}`);
-    console.log(`[IMPORTANT] 请立刻修改 admin.json 或通过环境变量覆盖，并确保不要把 admin.json 提交到仓库。`);
+// --------------------- 管理员配置 --------------------
+function normalizeAdminConfig(adminCfg) {
+    if (!adminCfg) return null;
+    if (adminCfg.username && adminCfg.password && adminCfg.totpSecret) return adminCfg;
+    if (adminCfg.default && adminCfg.default.username && adminCfg.default.password && adminCfg.default.totpSecret) return adminCfg.default;
+    return null;
 }
+
+const ADMIN = normalizeAdminConfig(config.admin);
+if (!ADMIN) {
+    console.warn("未在 config.json 中配置 admin（username/password/totpSecret），管理员登录将不可用。");
+}
+// -------------------- 管理员配置结束 --------------------
+
 
 // 确保whitedata.json文件存在并初始化
 if (!fs.existsSync(whitedataFile)) {
@@ -189,14 +271,14 @@ if (!fs.existsSync(couponsFile)) {
     fs.writeFileSync(couponsFile, "[]");
     console.log(`已创建兑换码数据文件: ${couponsFile}`);
 }
-// 邮件配置（全部可通过环境变量 / config.json 覆盖）
+// 邮件配置
 const transporter = nodemailer.createTransport({
-    host: cfg('mail.host', 'smtp.example.com'),
-    port: parseInt(cfg('mail.port', '465'), 10),
-    secure: String(cfg('mail.secure', 'true')).toLowerCase() === 'true',
+    host: config.mail.host,
+    port: config.mail.port,
+    secure: config.mail.secure,
     auth: {
-        user: cfg('mail.user', ''),
-        pass: cfg('mail.pass', '')
+        user: config.mail.auth.user,
+        pass: config.mail.auth.pass
     },
 });
 
@@ -207,16 +289,47 @@ const adminSessions = new Map();
 function loger(str) {
     console.log(`[${new Date().toLocaleTimeString()}] ${str}`);
 }
-// 添加：生成随机会话ID
+// 生成随机会话ID
 function generateSessionId() {
-    return Date.now().toString(36) + Math.random().toString(36).substr(2);
+    // 使用加密安全随机数生成会话ID，避免可预测
+    return crypto.randomBytes(32).toString('hex');
 }
+
+// 提取请求指纹（用于绑定管理员会话，减少会话被盗用的风险）
+function getClientFingerprint(req) {
+    const xf = (req.headers['x-forwarded-for'] || '').toString();
+    const ip = (xf.split(',')[0] || '').trim() || req.ip || (req.socket && req.socket.remoteAddress) || '';
+    const ua = (req.headers['user-agent'] || '').toString();
+    return { ip, ua };
+}
+
+function getValidAdminSession(sessionId, req) {
+    if (!sessionId) return null;
+    const s = adminSessions.get(sessionId);
+    if (!s) return null;
+    if (typeof s.expire === 'number' && s.expire < Date.now()) {
+        adminSessions.delete(sessionId);
+        return null;
+    }
+
+    const fp = getClientFingerprint(req);
+    // 默认绑定IP/UA，可在 config.security.sessionBinding 中关闭
+    const bind = (config.security && config.security.sessionBinding && config.security.sessionBinding.admin) || { ip: true, ua: true };
+    if (bind.ip && s.ip && fp.ip && s.ip !== fp.ip) return null;
+    if (bind.ua && s.ua && fp.ua && s.ua !== fp.ua) return null;
+
+    // 滑动过期：每次校验成功就续期
+    s.expire = Date.now() + config.security.adminSessionTtlMs;
+    adminSessions.set(sessionId, s);
+    return s;
+}
+
 // 发送验证邮件
 async function sendVerificationEmail(email, code) {
     const mailOptions = {
-        from: cfg('mail.from', '"Server" <noreply@example.com>'),
+        from: `"${config.mail.fromName}" <${config.mail.fromAddress}>`,
         to: email,
-        subject: '邮箱验证',
+        subject: config.mail.verificationSubject,
         html: `<!DOCTYPE html>
             <html>
             <head>
@@ -247,7 +360,7 @@ async function sendVerificationEmail(email, code) {
                 <div class="container">
                     <div class="header">
                         <img src="${EMAIL_LOGO_URL}" alt="服务器Logo" class="logo">
-                        <h1>${cfg('mail.brandName', 'Minecraft 服务器管理系统')}</h1>
+                        <h1>${config.mail.fromName}</h1>
                     </div>
                     
                     <p>尊敬的玩家，您的验证码为：</p>
@@ -256,7 +369,7 @@ async function sendVerificationEmail(email, code) {
                     
                     <div class="footer">
                         <p>此为系统自动发送邮件，请勿回复</p>
-                        <p>© ${new Date().getFullYear()} ${cfg('mail.footerText','Minecraft 服务器管理系统')}</p>
+                        <p>© ${new Date().getFullYear()} ${config.mail.fromName}</p>
                     </div>
                 </div>
             </body>
@@ -381,13 +494,55 @@ setInterval(() => {
     }
 }, 1000);
 
-const httpsOptions = {
-    key: fs.readFileSync(cfg('tls.keyPath', "server.key")),
-    cert: fs.readFileSync(cfg('tls.certPath', "server.pem"))
-};
+function resolveMaybeRelative(pth) {
+    if (!pth) return pth;
+    return path.isAbsolute(pth) ? pth : path.join(__dirname, pth);
+}
+
+const portsFilePath = resolveMaybeRelative(config.storage.portsFile);
+
+// 确保端口配置文件存在并初始化
+try {
+    const portsDir = path.dirname(portsFilePath);
+    if (portsDir && portsDir !== '.' && !fs.existsSync(portsDir)) {
+        fs.mkdirSync(portsDir, { recursive: true });
+    }
+    if (!fs.existsSync(portsFilePath)) {
+        fs.writeFileSync(portsFilePath, JSON.stringify({}, null, 2));
+        console.log(`已创建端口配置文件: ${portsFilePath}`);
+    }
+} catch (e) {
+    console.error("初始化端口配置文件失败，将继续运行（但端口覆盖功能可能不可用）：", e);
+}
+
+
+function tryLoadHttpsOptions() {
+    const keyPath = resolveMaybeRelative(config.tls && config.tls.keyPath);
+    const certPath = resolveMaybeRelative(config.tls && config.tls.certPath);
+
+    if (!keyPath || !certPath) {
+        console.warn("TLS配置缺失，已禁用HTTPS");
+        return null;
+    }
+    if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+        console.warn(`未检测到TLS证书文件，已禁用HTTPS。key: ${keyPath} cert: ${certPath}`);
+        return null;
+    }
+    try {
+        return {
+            key: fs.readFileSync(keyPath),
+            cert: fs.readFileSync(certPath)
+        };
+    } catch (e) {
+        console.error("读取TLS证书失败，已禁用HTTPS：", e);
+        return null;
+    }
+}
+
+const httpsOptions = tryLoadHttpsOptions();
 
 // 创建avatars目录
-const avatarsDir = path.join(__dirname, 'avatars');
+const avatarsDir = path.join(__dirname, config.storage.avatarsDir);
 if (!fs.existsSync(avatarsDir)) {
     fs.mkdirSync(avatarsDir);
 }
@@ -398,7 +553,7 @@ app.post('/api/uploadAvatar', async (req, res) => {
         return res.status(400).json({ success: false, message: '参数错误' });
     }
     const base64Data = avatar.replace(/^data:image\/\w+;base64,/, "");
-    if (base64Data.length > 10 * 1024 * 1024) { // 10MB
+    if (base64Data.length > config.storage.maxAvatarBytes) {
         return res.status(400).json({ success: false, message: '头像图片过大，请压缩后上传' });
     }
     const buffer = Buffer.from(base64Data, 'base64');
@@ -429,19 +584,19 @@ app.use('/avatars', express.static(avatarsDir));
 // Webhook端口更新接口
 let portConfig = {};
 
-app.post('/webhook/update-port', (req, res) => {
+app.post(config.webhook.updatePortPath, (req, res) => {
     try {
         const { host, port } = req.body;
         if (host && port) {
             // 读取当前端口配置
-            let portConfig = {};
-            if (fs.existsSync('ports.json')) {
-                portConfig = JSON.parse(fs.readFileSync('ports.json'));
+            let currentPorts = {};
+            if (fs.existsSync(portsFilePath)) {
+                currentPorts = JSON.parse(fs.readFileSync(portsFilePath));
             }
 
             // 更新指定主机的端口
-            portConfig[host] = port;
-            fs.writeFileSync('ports.json', JSON.stringify(portConfig));
+            currentPorts[host] = port;
+            fs.writeFileSync(portsFilePath, JSON.stringify(currentPorts, null, 2));
 
             res.sendStatus(200);
             loger(`Webhook端口更新: ${host} -> ${port}`);
@@ -495,17 +650,14 @@ function cleanMinecraftText(raw) {
 app.get('/api/serverStatus', async (req, res) => {
     try {
         // 确保读取最新的端口配置
-        if (fs.existsSync('ports.json')) {
-            portConfig = JSON.parse(fs.readFileSync('ports.json'));
+        if (fs.existsSync(portsFilePath)) {
+            portConfig = JSON.parse(fs.readFileSync(portsFilePath));
         } else {
             portConfig = {};
         }
 
-        // 服务器列表（建议放在 config.json / 环境变量中）
-        const servers = cfgJson('servers', [
-            { name: '示例线路1', host: 'example.com', defaultPort: 25565 },
-            { name: '示例线路2', host: 'example.net', defaultPort: 25565 }
-        ]);
+        // 服务器列表
+        const servers = config.status.servers;
 
         // 检测所有服务器状态
         const serverStatuses = await Promise.all(servers.map(async server => {
@@ -542,13 +694,13 @@ async function getServerStatus(host, port) {
     const cachedStatus = serverStatusCache.get(cacheKey);
 
     // 缓存预热：提前刷新即将过期的缓存
-    if (cachedStatus && Date.now() - cachedStatus.timestamp < 25000) {
+    if (cachedStatus && Date.now() - cachedStatus.timestamp < config.status.cacheTtlMs) {
         return cachedStatus.data;
     }
 
     // 尝试所有API
     const apiPromises = STATUS_APIS.map(api =>
-        fetchWithRetry(api.url(host, port), api.parser, api.name, 3)
+        fetchWithRetry(api.url(host, port), api.parser, api.name, config.status.maxRetries)
     );
 
     try {
@@ -565,36 +717,13 @@ async function getServerStatus(host, port) {
     } catch (error) {
         loger(`所有API检测均失败: ${error.message}`);
 
-        // 尝试直接端口探测
-        try {
-            const isReachable = await probePortWithRetry(host, port, 3);
-            if (isReachable) {
-                const result = {
-                    online: true,
-                    players: { online: 0, max: 0 },
-                    version: '服务可达但未获取详情',
-                    motd: '直接端口探测成功',
-                    error: null
-                };
-
-                serverStatusCache.set(cacheKey, {
-                    data: result,
-                    timestamp: Date.now()
-                });
-
-                return result;
-            }
-        } catch (portError) {
-            loger(`直接端口探测失败: ${portError.message}`);
-        }
-
-        // 返回最终失败状态
+// 返回最终失败状态
         return {
             online: false,
             players: { online: 0, max: 0 },
             version: '未知',
             motd: '',
-            error: '所有检测方法均失败'
+            error: '所有状态API均失败'
         };
     }
 }
@@ -604,7 +733,7 @@ async function fetchWithRetry(url, parser, apiName, maxRetries = 3) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const response = await fetch(url, {
-                signal: AbortSignal.timeout(5000)
+                signal: AbortSignal.timeout(config.status.fetchTimeoutMs)
             });
 
             if (!response.ok) {
@@ -627,60 +756,11 @@ async function fetchWithRetry(url, parser, apiName, maxRetries = 3) {
     }
 }
 
-// 带重试的端口探测
-async function probePortWithRetry(host, port, maxRetries = 3) {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            loger(`尝试端口探测(${attempt}/${maxRetries}): ${host}:${port}`);
-            const isReachable = await probePort(host, port);
-            return isReachable;
-        } catch (error) {
-            loger(`端口探测失败: ${error.message}`);
-
-            if (attempt < maxRetries) {
-                // 随机延迟避免同步请求
-                const delay = 500 + Math.random() * 1000;
-                await new Promise(resolve => setTimeout(resolve, delay));
-            }
-        }
-    }
-    throw new Error(`所有端口探测尝试均失败`);
-}
-
-// 优化端口探测函数
-function probePort(host, port) {
-    return new Promise((resolve, reject) => {
-        const socket = new net.Socket();
-        let timeoutId;
-
-        const cleanup = () => {
-            clearTimeout(timeoutId);
-            socket.destroy();
-        };
-
-        socket.on('connect', () => {
-            cleanup();
-            resolve(true);
-        });
-
-        socket.on('error', (err) => {
-            cleanup();
-            resolve(false);
-        });
-
-        socket.connect(port, host);
-
-        timeoutId = setTimeout(() => {
-            cleanup();
-            resolve(false);
-        }, 5000);
-    });
-}
 // 端口配置接口
 app.get('/ports', (req, res) => {
     try {
-        if (fs.existsSync('ports.json')) {
-            portConfig = JSON.parse(fs.readFileSync('ports.json'));
+        if (fs.existsSync(portsFilePath)) {
+            portConfig = JSON.parse(fs.readFileSync(portsFilePath));
         } else {
             portConfig = {};
         }
@@ -722,7 +802,7 @@ app.post('/api/webLogin', async (req, res) => {
             const sessionId = generateSessionId();
             webSessions.set(sessionId, {
                 username: username,
-                expire: Date.now() + 3600000 // 1小时有效期
+                expire: Date.now() + config.security.webSessionTtlMs // 配置项
             });
 
             return res.json({
@@ -796,7 +876,7 @@ app.get('/api/sign', async (req, res) => {
 
         // 获取北京时间今天日期 (YYYY-MM-DD)
         const today = new Date();
-        const beijingTime = new Date(today.getTime() + (8 * 60 * 60 * 1000)); // UTC+8
+        const beijingTime = new Date(today.getTime() + (config.sign.timezoneOffsetHours * 60 * 60 * 1000)); // UTC+8
         const todayStr = beijingTime.toISOString().split('T')[0].substring(0, 10);
 
         // 检查用户数据是否存在
@@ -986,7 +1066,7 @@ app.all('/api', async (req, res) => {
 
     // 检查参数
     for (let key in p) {
-        if (p[key].indexOf(" ") != -1) {
+        if (typeof p[key] === 'string' && p[key].indexOf(" ") != -1) {
             return res.status(400).send("禁止传入空格！");
         }
     }
@@ -1000,23 +1080,12 @@ app.all('/api', async (req, res) => {
     // 管理员登录
     if (p.method == "adminLogin" && p.name && p.passwd && p.totp) {
         try {
-            if (!fs.existsSync(adminFile)) {
-                const defaultUser = cfg('admin.username', 'admin');
-                const defaultPass = cfg('admin.password', genRandomPassword(18));
-                const defaultSecret = cfg('admin.totpSecret', speakeasy.generateSecret({ length: 20 }).base32);
+            const adminData = ADMIN;
+if (!adminData || !adminData.username || !adminData.password || !adminData.totpSecret) {
+    return res.json({ success: false, message: "管理员配置缺失，请在config.json中配置admin字段" });
+}
 
-                fs.writeFileSync(adminFile, JSON.stringify({
-                    username: defaultUser,
-                    password: defaultPass,
-                    totpSecret: defaultSecret
-                }));
-
-                console.log(`[IMPORTANT] admin.json 不存在，已自动生成。请尽快修改管理员密码并避免提交到仓库。`);
-            }
-
-            const adminData = JSON.parse(fs.readFileSync(adminFile));
-
-            if (p.name !== adminData.username || p.passwd !== adminData.password) {
+if (p.name !== adminData.username || p.passwd !== adminData.password) {
                 return res.json({ success: false, message: "管理员账号或密码错误" });
             }
 
@@ -1031,8 +1100,14 @@ app.all('/api', async (req, res) => {
                 return res.json({ success: false, message: "验证码错误" });
             }
 
-            const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2);
-            adminSessions.set(sessionId, { username: p.name, expire: Date.now() + 3600000 });
+            const sessionId = generateSessionId();
+            const fp = getClientFingerprint(req);
+            adminSessions.set(sessionId, {
+                username: p.name,
+                expire: Date.now() + config.security.adminSessionTtlMs,
+                ip: fp.ip,
+                ua: fp.ua
+            });
 
             return res.json({
                 success: true,
@@ -1048,8 +1123,8 @@ app.all('/api', async (req, res) => {
 
     // 获取所有用户
     if (p.method == "getAllUsers" && p.session) {
-        if (!adminSessions.has(p.session)) {
-            return res.json({ success: false, message: "管理员会话无效" });
+        if (!getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "管理员会话无效或已过期" });
         }
 
         try {
@@ -1063,8 +1138,8 @@ app.all('/api', async (req, res) => {
 
     // 激活用户
     if (p.method == "activateUser" && p.name && p.session) {
-        if (!adminSessions.has(p.session)) {
-            return res.json({ success: false, message: "管理员会话无效" });
+        if (!getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "管理员会话无效或已过期" });
         }
 
         try {
@@ -1086,8 +1161,8 @@ app.all('/api', async (req, res) => {
 
     // 封禁用户
     if (p.method == "banUser" && p.name && p.session) {
-        if (!adminSessions.has(p.session)) {
-            return res.json({ success: false, message: "管理员会话无效" });
+        if (!getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "管理员会话无效或已过期" });
         }
 
         try {
@@ -1109,8 +1184,8 @@ app.all('/api', async (req, res) => {
 
     // 解封用户
     if (p.method == "unbanUser" && p.name && p.session) {
-        if (!adminSessions.has(p.session)) {
-            return res.json({ success: false, message: "管理员会话无效" });
+        if (!getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "管理员会话无效或已过期" });
         }
 
         try {
@@ -1131,8 +1206,8 @@ app.all('/api', async (req, res) => {
     }
     // 在API处理部分添加删除用户方法
     if (p.method == "deleteUser" && p.name && p.session) {
-        if (!adminSessions.has(p.session)) {
-            return res.json({ success: false, message: "管理员会话无效" });
+        if (!getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "管理员会话无效或已过期" });
         }
 
         try {
@@ -1165,8 +1240,8 @@ app.all('/api', async (req, res) => {
     }
     // 在API处理部分添加修改邮箱方法
     if (p.method == "updateEmail" && p.name && p.newEmail && p.session) {
-        if (!adminSessions.has(p.session)) {
-            return res.json({ success: false, message: "管理员会话无效" });
+        if (!getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "管理员会话无效或已过期" });
         }
 
         try {
@@ -1222,8 +1297,8 @@ app.all('/api', async (req, res) => {
     // 添加商品
     if (p.method == "addShopItem" && p.session) {
         // 新增：管理员会话验证
-        if (!adminSessions.has(p.session)) {
-            return res.json({ success: false, message: "管理员会话无效" });
+        if (!getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "管理员会话无效或已过期" });
         }
 
         try {
@@ -1262,8 +1337,8 @@ app.all('/api', async (req, res) => {
     // 删除商品
     if (p.method == "deleteShopItem" && p.itemId && p.session) {
         // 新增：管理员会话验证
-        if (!adminSessions.has(p.session)) {
-            return res.json({ success: false, message: "管理员会话无效" });
+        if (!getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "管理员会话无效或已过期" });
         }
     }
 
@@ -1370,7 +1445,7 @@ app.all('/api', async (req, res) => {
                 }],
                 designatedPlayer: username, // 指定玩家
                 oneTimeUse: true, // 一次性使用
-                expiresAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+                expiresAt: new Date(Date.now() + config.shop.couponValidityMs).toISOString(),
                 createdAt: new Date().toISOString(),
                 used: false,
                 usedBy: []
@@ -1392,8 +1467,8 @@ app.all('/api', async (req, res) => {
     // 修改兑换码生成逻辑
     if (p.method == "generateCoupon" && p.session) {
         // 新增：管理员会话验证
-        if (!adminSessions.has(p.session)) {
-            return res.json({ success: false, message: "管理员会话无效" });
+        if (!getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "管理员会话无效或已过期" });
         }
         try {
             const session = p.session;
@@ -1401,7 +1476,7 @@ app.all('/api', async (req, res) => {
             const { type, items, expiresAt, designatedPlayer, oneTimeUse } = req.body;
 
             // 验证管理员会话
-            if (!adminSessions.has(session)) {
+            if (!getValidAdminSession(session, req)) {
                 return res.json({ success: false, message: "管理员会话无效" });
             }
 
@@ -1502,6 +1577,9 @@ app.all('/api', async (req, res) => {
     }
     // 获取兑换码
     if (p.method == "getCoupons") {
+        if (!p.session || !getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "需要有效的管理员会话" });
+        }
         try {
             const coupons = JSON.parse(fs.readFileSync(couponsFile));
             const enhancedCoupons = coupons.map(coupon => {
@@ -1519,8 +1597,8 @@ app.all('/api', async (req, res) => {
 
     // 删除兑换码
     if (p.method == "deleteCoupon" && p.code && p.session) {
-        if (!adminSessions.has(p.session)) {
-            return res.json({ success: false, message: "管理员会话无效" });
+        if (!getValidAdminSession(p.session, req)) {
+            return res.json({ success: false, message: "管理员会话无效或已过期" });
         }
 
         try {
@@ -1549,7 +1627,7 @@ app.all('/api', async (req, res) => {
     function generateCouponCode() {
         const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
         let result = '';
-        for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < config.shop.couponLength; i++) {
             result += chars.charAt(Math.floor(Math.random() * chars.length));
         }
         return result;
@@ -1623,7 +1701,7 @@ app.all('/api', async (req, res) => {
             const code = generateVerificationCode();
             verificationCodes.set(player.email, {
                 code,
-                expire: Date.now() + 300000,
+                expire: Date.now() + config.security.verificationCodeTtlMs,
                 name: player.name,
                 newpasswd: p.newpasswd
             });
@@ -1691,7 +1769,7 @@ app.all('/api', async (req, res) => {
             const code = generateVerificationCode();
             verificationCodes.set(p.email, {
                 code,
-                expire: Date.now() + 300000,
+                expire: Date.now() + config.security.verificationCodeTtlMs,
                 name: p.name,
                 passwd: p.passwd,
                 uuid: id
@@ -1816,39 +1894,23 @@ app.all('/api', async (req, res) => {
     }
 });
 
-// 创建 HTTPS 服务器（可选：如果没有证书文件则不会启动 HTTPS）
-try {
-  if (fs.existsSync(TLS_KEYPATH) && fs.existsSync(TLS_CERTPATH)) {
-    const httpsOptions = {
-      key: fs.readFileSync(TLS_KEYPATH),
-      cert: fs.readFileSync(TLS_CERTPATH)
-    };
-    https.createServer(httpsOptions, app).listen(parseInt(cfg('ports.https', '443'), 10), () => {
-      console.log(`HTTPS 服务器运行在端口 ${cfg('ports.https','443')}`);
+// 创建HTTPS服务器（如证书存在）
+if (httpsOptions) {
+    https.createServer(httpsOptions, app).listen(config.http.httpsPort, () => {
+        console.log(`HTTPS服务器运行在端口 ${config.http.httpsPort}`);
     });
-  } else {
-    console.warn('[WARN] 未找到 TLS 证书文件，已跳过 HTTPS 启动。你仍可通过 HTTP 或使用反向代理终止 TLS。');
-  }
-} catch (e) {
-  console.warn('[WARN] HTTPS 启动失败（已跳过）：', e.message);
+} else {
+    console.log("未启用HTTPS（未检测到或无法读取证书）");
 }
 
-http.createServer(app).listen(parseInt(cfg('ports.http', '80'), 10), () => {
-    console.log(`HTTP服务器运行在端口 ${cfg("ports.http","80")}`);
+// HTTP服务器始终启动
+http.createServer(app).listen(config.http.httpPort, () => {
+    console.log(`HTTP服务器运行在端口 ${config.http.httpPort}`);
 });
 // 插件交互HTTP服务器
 http.createServer((req, res) => {
     loger(`<插件操作> IP: ${req.socket.remoteAddress} 请求方法: ${req.method} 操作: ${req.url}`);
-    const pluginAllowlist = cfgJson('plugin.allowlist', ['127.0.0.1', '::1']);
-// 插件交互：仅允许白名单 IP 访问（可在 config.json / 环境变量中配置）
-function isAllowedPluginIP(ip) {
-  if (!ip) return false;
-  // 兼容 IPv4-mapped IPv6
-  const normalized = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
-  return pluginAllowlist.includes(ip) || pluginAllowlist.includes(normalized);
-}
-
-    if (isAllowedPluginIP(req.socket.remoteAddress)) {
+    if (config.plugin.allowedIPs.includes(req.socket.remoteAddress)) {
         if (req.url == "/") {
             loger(`<插件操作> IP: ${req.socket.remoteAddress} 访问了 测试链接`);
             res.writeHead(200);
@@ -1973,6 +2035,6 @@ function isAllowedPluginIP(ip) {
         res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
         res.end("bad request");
     }
-}).listen(parseInt(cfg('ports.plugin', '8094'), 10), () => {
-    console.log(`插件交互端口：${cfg("ports.plugin","8094")}，请勿转发此端口，防火墙请屏蔽此端口`);
+}).listen(config.http.pluginPort, () => {
+    console.log("插件交互端口：8094，请勿转发此端口，防火墙请屏蔽此端口");
 });
