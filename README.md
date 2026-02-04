@@ -94,7 +94,6 @@ node whiteHitBlack.js
   "files": {
     "whitelist": "whitelist.json",
     "whitedata": "whitedata.json",
-    "admin": "admin.json",
     "signData": "signData.json",
     "shopItems": "shopItems.json",
     "coupons": "coupons.json"
