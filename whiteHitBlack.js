@@ -8,137 +8,136 @@ const crypto = require('crypto');
 // -------------------- 配置加载 --------------------
 const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, 'config.json');
 
+function resolveMaybeRelativePath(pth) {
+    if (!pth) return pth;
+    return path.isAbsolute(pth) ? pth : path.join(__dirname, pth);
+}
+
 
 function isPlainObject(v) {
-  return v && typeof v === 'object' && !Array.isArray(v);
+    return v && typeof v === 'object' && !Array.isArray(v);
 }
 function deepMerge(base, extra) {
-  const out = { ...base };
-  for (const [k, v] of Object.entries(extra || {})) {
-    if (isPlainObject(v) && isPlainObject(out[k])) out[k] = deepMerge(out[k], v);
-    else out[k] = v;
-  }
-  return out;
+    const out = { ...base };
+    for (const [k, v] of Object.entries(extra || {})) {
+        if (isPlainObject(v) && isPlainObject(out[k])) out[k] = deepMerge(out[k], v);
+        else out[k] = v;
+    }
+    return out;
 }
 
 // 代码内置默认值
 const DEFAULT_CONFIG = {
-  email: {
-    logoUrl: "https://image.010831.xyz/gbc/icon.jpg"
-  },
-  files: {
-    whitelist: "whitelist.json",
-    whitedata: "whitedata.json",
-    admin: "admin.json",
-    signData: "signData.json",
-    shopItems: "shopItems.json",
-    coupons: "coupons.json"
-  },
-  http: {
-    bodyLimit: "10mb",
-    staticDir: "public",
-    httpPort: 80,
-    httpsPort: 443,
-    pluginPort: 8094
-  },
-  tls: {
-    keyPath: "server.key",
-    certPath: "server.pem"
-  },
-  game: {
-    maxOnlineTimeMs: 1000 * 60 * 60 * 24 * 31 * 12 * 100,
-    onlineMode: false
-  },
-  admin: {
-    default: {
-      username: "admin",
-      password: "admin123",
-      totpSecret: "GSEWY3DPEHPK3DHJ"
-    }
-  },
-  mail: {
-    host: "smtp.exmail.qq.com",
-    port: 465,
-    secure: true,
-    auth: {
-      user: "CHANGE_ME@example.com",
-      pass: "CHANGE_ME" 
+    email: {
+        logoUrl: "https://image.010831.xyz/gbc/icon.jpg"
     },
-    fromName: "嘎嘣脆服务器官方",
-    fromAddress: "CHANGE_ME@example.com",
-    verificationSubject: "邮箱验证"
-  },
-  security: {
-    serverToken: "mikumiku",
-    verificationCodeTtlMs: 5 * 60 * 1000,
-    adminSessionTtlMs: 60 * 60 * 1000,
-    webSessionTtlMs: 60 * 60 * 1000,
-    sessionBinding: {
-      admin: { ip: false, ua: false },
-      web: { ip: false, ua: false }
+    files: {
+        whitelist: "whitelist.json",
+        whitedata: "whitedata.json",
+        signData: "signData.json",
+        shopItems: "shopItems.json",
+        coupons: "coupons.json"
+    },
+    http: {
+        bodyLimit: "10mb",
+        staticDir: "public",
+        httpPort: 80,
+        httpsPort: 443,
+        pluginPort: 8094
+    },
+    tls: {
+        keyPath: "server.key",
+        certPath: "server.pem"
+    },
+    game: {
+        maxOnlineTimeMs: 1000 * 60 * 60 * 24 * 31 * 12 * 100,
+        onlineMode: false
+    },
+    admin: {
+        default: {
+            username: "admin",
+            password: "admin123",
+            totpSecret: "GSEWY3DPEHPK3DHJ"
+        }
+    },
+    mail: {
+        host: "smtp.exmail.qq.com",
+        port: 465,
+        secure: true,
+        auth: {
+            user: "CHANGE_ME@example.com",
+            pass: "CHANGE_ME"
+        },
+        fromName: "嘎嘣脆服务器官方",
+        fromAddress: "CHANGE_ME@example.com",
+        verificationSubject: "邮箱验证"
+    },
+    security: {
+        serverToken: "CHANGE_ME",
+        verificationCodeTtlMs: 5 * 60 * 1000,
+        adminSessionTtlMs: 60 * 60 * 1000,
+        webSessionTtlMs: 60 * 60 * 1000,
+        sessionBinding: {
+            admin: { ip: false, ua: false },
+            web: { ip: false, ua: false }
+        }
+    },
+    storage: {
+        avatarsDir: "avatars",
+        maxAvatarBytes: 10 * 1024 * 1024,
+        portsFile: "ports.json"
+    },
+    webhook: {
+        updatePortPath: "/webhook/update-port"
+    },
+    status: {
+        servers: [
+            { name: "电信线路", host: "v4.242774835.xyz", defaultPort: 1259 },
+            { name: "电信IPv6", host: "ipv6.242774835.xyz", defaultPort: 25565 }
+        ],
+        maxRetries: 3,
+        fetchTimeoutMs: 5000,
+        cacheTtlMs: 25000
+    },
+    shop: {
+        couponLength: 10,
+        couponValidityMs: 3 * 24 * 60 * 60 * 1000
+    },
+    sign: {
+        timezoneOffsetHours: 8 // 北京时间 UTC+8
+    },
+    plugin: {
+        allowedIPs: [
+            "192.168.2.230",
+            "192.168.10.8",
+            "::ffff:192.168.10.8",
+            "::ffff:192.168.2.230"
+        ]
     }
-  },
-  storage: {
-    avatarsDir: "avatars",
-    maxAvatarBytes: 10 * 1024 * 1024,
-    portsFile: "ports.json"
-  },
-  webhook: {
-    updatePortPath: "/webhook/update-port"
-  },
-  status: {
-    // 服务器列表移到配置中，后端会读取这里
-    servers: [
-      { name: "电信线路", host: "v4.242774835.xyz", defaultPort: 1259 },
-      { name: "移动线路", host: "ipv4.242774835.xyz", defaultPort: 55917 },
-      { name: "移动IPv6", host: "mc.242774835.xyz", defaultPort: 25565 },
-      { name: "电信IPv6", host: "ipv6.242774835.xyz", defaultPort: 25565 },
-      { name: "miku服务器中转", host: "server.242774835.xyz", defaultPort: 10060 }
-    ],
-    maxRetries: 3,
-    fetchTimeoutMs: 5000,
-cacheTtlMs: 25000
-  },
-  shop: {
-    couponLength: 10,
-    couponValidityMs: 3 * 24 * 60 * 60 * 1000
-  },
-  sign: {
-    timezoneOffsetHours: 8 // 北京时间 UTC+8
-  },
-  plugin: {
-    allowedIPs: [
-      "192.168.2.230",
-      "192.168.10.8",
-      "::ffff:192.168.10.8",
-      "::ffff:192.168.2.230"
-    ]
-  }
 };
 
 function loadConfig() {
-  let cfg = DEFAULT_CONFIG;
-  try {
-    if (fs.existsSync(CONFIG_PATH)) {
-      const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
-      const userCfg = JSON.parse(raw);
-      cfg = deepMerge(DEFAULT_CONFIG, userCfg);
-    } else {
-      // 自动生成一份示例配置，方便首次启动
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
-      console.log(`已生成默认配置文件: ${CONFIG_PATH}，请按需修改后重新启动服务`);
-      process.exit(0);
+    let cfg = DEFAULT_CONFIG;
+    try {
+        if (fs.existsSync(CONFIG_PATH)) {
+            const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+            const userCfg = JSON.parse(raw);
+            cfg = deepMerge(DEFAULT_CONFIG, userCfg);
+        } else {
+            fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
+            console.log(`已生成默认配置文件: ${CONFIG_PATH}，请按需修改后重新启动服务`);
+            process.exit(0);
+        }
+    } catch (e) {
+        console.error("读取/解析配置文件失败，将使用默认配置:", e);
     }
-  } catch (e) {
-    console.error("读取/解析配置文件失败，将使用默认配置:", e);
-  }
 
-  // 用环境变量覆盖敏感项（可选，但强烈推荐）
-  if (process.env.SMTP_USER) cfg.mail.auth.user = process.env.SMTP_USER;
-  if (process.env.SMTP_PASS) cfg.mail.auth.pass = process.env.SMTP_PASS;
-  if (process.env.SERVER_TOKEN) cfg.security.serverToken = process.env.SERVER_TOKEN;
+    // 用环境变量覆盖敏感项（可选，但强烈推荐）
+    if (process.env.SMTP_USER) cfg.mail.auth.user = process.env.SMTP_USER;
+    if (process.env.SMTP_PASS) cfg.mail.auth.pass = process.env.SMTP_PASS;
+    if (process.env.SERVER_TOKEN) cfg.security.serverToken = process.env.SERVER_TOKEN;
 
-  return cfg;
+    return cfg;
 }
 
 const config = loadConfig();
@@ -153,11 +152,11 @@ const nodemailer = require('nodemailer');
 const speakeasy = require('speakeasy');
 const bodyParser = require('body-parser');
 const EMAIL_LOGO_URL = config.email.logoUrl;
-const whitelistFile = config.files.whitelist;
-const whitedataFile = config.files.whitedata;
-const signDataFile = config.files.signData;
-const shopItemsFile = config.files.shopItems;
-const couponsFile = config.files.coupons;
+const whitelistFile = resolveMaybeRelativePath(config.files.whitelist);
+const whitedataFile = resolveMaybeRelativePath(config.files.whitedata);
+const signDataFile = resolveMaybeRelativePath(config.files.signData);
+const shopItemsFile = resolveMaybeRelativePath(config.files.shopItems);
+const couponsFile = resolveMaybeRelativePath(config.files.coupons);
 const serverStatusCache = new Map();
 const SERVER_TOKEN = config.security.serverToken;
 const STATUS_APIS = [
@@ -494,12 +493,12 @@ setInterval(() => {
     }
 }, 1000);
 
-function resolveMaybeRelative(pth) {
+function resolveMaybeRelative_DEPRECATED(pth) {
     if (!pth) return pth;
     return path.isAbsolute(pth) ? pth : path.join(__dirname, pth);
 }
 
-const portsFilePath = resolveMaybeRelative(config.storage.portsFile);
+const portsFilePath = resolveMaybeRelativePath(config.storage.portsFile);
 
 // 确保端口配置文件存在并初始化
 try {
@@ -517,8 +516,8 @@ try {
 
 
 function tryLoadHttpsOptions() {
-    const keyPath = resolveMaybeRelative(config.tls && config.tls.keyPath);
-    const certPath = resolveMaybeRelative(config.tls && config.tls.certPath);
+    const keyPath = resolveMaybeRelativePath(config.tls && config.tls.keyPath);
+    const certPath = resolveMaybeRelativePath(config.tls && config.tls.certPath);
 
     if (!keyPath || !certPath) {
         console.warn("TLS配置缺失，已禁用HTTPS");
@@ -542,7 +541,7 @@ function tryLoadHttpsOptions() {
 const httpsOptions = tryLoadHttpsOptions();
 
 // 创建avatars目录
-const avatarsDir = path.join(__dirname, config.storage.avatarsDir);
+const avatarsDir = resolveMaybeRelativePath(config.storage.avatarsDir);
 if (!fs.existsSync(avatarsDir)) {
     fs.mkdirSync(avatarsDir);
 }
@@ -586,27 +585,39 @@ let portConfig = {};
 
 app.post(config.webhook.updatePortPath, (req, res) => {
     try {
-        const { host, port } = req.body;
-        if (host && port) {
-            // 读取当前端口配置
-            let currentPorts = {};
-            if (fs.existsSync(portsFilePath)) {
-                currentPorts = JSON.parse(fs.readFileSync(portsFilePath));
-            }
-
-            // 更新指定主机的端口
-            currentPorts[host] = port;
-            fs.writeFileSync(portsFilePath, JSON.stringify(currentPorts, null, 2));
-
-            res.sendStatus(200);
-            loger(`Webhook端口更新: ${host} -> ${port}`);
-        } else {
-            res.status(400).send('Invalid parameters');
+        const { name, host, port } = req.body || {};
+        // 安全限制：name 必须存在于配置文件，且 host 必须与配置中该 name 对应的 host 一致
+        if (!name || !host || !port) {
+            return res.status(400).send('Invalid parameters');
         }
+
+        const servers = (config.status && Array.isArray(config.status.servers)) ? config.status.servers : [];
+        const matched = servers.find(s => s && s.name === name);
+        if (!matched) {
+            loger(`Webhook拒绝: 未在配置中找到 name=${name}`);
+            return res.status(403).send('Unknown server name');
+        }
+        if (String(matched.host) !== String(host)) {
+            loger(`Webhook拒绝: host 不匹配 name=${name} expected=${matched.host} got=${host}`);
+            return res.status(403).send('Host mismatch');
+        }
+
+        // 以“名称”为主键存储端口（而不是IP/host）
+        let currentPorts = {};
+        if (fs.existsSync(portsFilePath)) {
+            currentPorts = JSON.parse(fs.readFileSync(portsFilePath, 'utf8') || '{}');
+        }
+
+        currentPorts[String(name)] = Number(port);
+        fs.writeFileSync(portsFilePath, JSON.stringify(currentPorts, null, 2));
+
+        res.sendStatus(200);
+        loger(`Webhook端口更新: ${name} (${host}) -> ${port}`);
     } catch (error) {
         res.status(400).send('Invalid JSON');
     }
 });
+
 function toNumberSafe(val) {
     if (val == null) return 0;
     if (typeof val === 'object') {
@@ -662,7 +673,7 @@ app.get('/api/serverStatus', async (req, res) => {
         // 检测所有服务器状态
         const serverStatuses = await Promise.all(servers.map(async server => {
             // 优先使用配置中的端口，没有则用默认端口
-            const port = portConfig[server.host] || server.defaultPort;
+            const port = portConfig[server.name] || portConfig[server.host] || server.defaultPort;
             try {
                 const status = await getServerStatus(server.host, port);
                 return {
@@ -717,7 +728,7 @@ async function getServerStatus(host, port) {
     } catch (error) {
         loger(`所有API检测均失败: ${error.message}`);
 
-// 返回最终失败状态
+        // 返回最终失败状态
         return {
             online: false,
             players: { online: 0, max: 0 },
@@ -1081,11 +1092,11 @@ app.all('/api', async (req, res) => {
     if (p.method == "adminLogin" && p.name && p.passwd && p.totp) {
         try {
             const adminData = ADMIN;
-if (!adminData || !adminData.username || !adminData.password || !adminData.totpSecret) {
-    return res.json({ success: false, message: "管理员配置缺失，请在config.json中配置admin字段" });
-}
+            if (!adminData || !adminData.username || !adminData.password || !adminData.totpSecret) {
+                return res.json({ success: false, message: "管理员配置缺失，请在config.json中配置admin字段" });
+            }
 
-if (p.name !== adminData.username || p.passwd !== adminData.password) {
+            if (p.name !== adminData.username || p.passwd !== adminData.password) {
                 return res.json({ success: false, message: "管理员账号或密码错误" });
             }
 
@@ -2036,5 +2047,5 @@ http.createServer((req, res) => {
         res.end("bad request");
     }
 }).listen(config.http.pluginPort, () => {
-    console.log("插件交互端口：8094，请勿转发此端口，防火墙请屏蔽此端口");
+    console.log(`插件交互端口：${config.http.pluginPort}，请勿转发此端口，防火墙请屏蔽此端口`);
 });

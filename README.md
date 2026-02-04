@@ -84,7 +84,7 @@ node whiteHitBlack.js
 
 ---
 
-### config.json 示例（建议从程序生成的默认文件改）
+### config.json 示例
 
 ```jsonc
 {
@@ -177,7 +177,7 @@ node whiteHitBlack.js
 
 ---
 
-### 配置项说明（开发者最常改的）
+### 配置项说明
 
 #### `http`
 - `staticDir`：静态资源目录（默认 `public`，用于前端静态页面/图片等）
@@ -249,7 +249,7 @@ node whiteHitBlack.js
 - `signData.json`：签到/积分数据（对象）
 - `shopItems.json`：商品列表（数组）
 - `coupons.json`：兑换码列表（数组）
-- `ports.json`：主机 -> 端口覆盖配置（对象）
+- `ports.json`：端口覆盖配置（对象）
 - `avatars/`：头像上传存储目录
 - `public/`：静态资源目录（手动）
 
@@ -281,7 +281,7 @@ node whiteHitBlack.js
 
 ## API 接口概览
 
-> 你的代码里同时存在“REST 风格接口”和“/api 单入口 query method 接口”。
+> 代码里同时存在“REST 风格接口”和“/api 单入口 query method 接口”。
 
 ### A. REST 风格接口
 
@@ -312,8 +312,13 @@ node whiteHitBlack.js
   返回当前 `ports.json` 中的端口覆盖表
 
 - `POST <webhook.updatePortPath>`（默认 `/webhook/update-port`）  
-  body: `{ host, port }`  
+  body: `{ name, host, port }`  
   更新 ports.json 用于 serverStatus 查询时覆盖端口
+
+  **安全校验（防滥用）**：
+  - `name` 必须存在于 `config.status.servers[].name`
+  - `host` 必须与该 `name` 对应的 `config.status.servers[].host` 完全一致
+  - 端口覆盖将以 `name` 作为主键写入 `ports.json`
 
 ---
 
