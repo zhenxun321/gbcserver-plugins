@@ -111,14 +111,13 @@ const DEFAULT_CONFIG = {
         logoUrl: "https://image.010831.xyz/gbc/icon.jpg"
     },
     files: {
-        whitelist: "whitelist.json",
         whitedata: "whitedata.json",
         signData: "signData.json",
         shopItems: "shopItems.json",
         coupons: "coupons.json"
     },
     http: {
-        bodyLimit: "10mb",
+        bodyLimit: "25mb",
         responseLimitBytes: 20 * 1024 * 1024,
         staticDir: "public",
         httpPort: 80,
@@ -160,6 +159,14 @@ const DEFAULT_CONFIG = {
         sessionBinding: {
             admin: { ip: false, ua: false },
             web: { ip: false, ua: false }
+        },
+        // 管理员登录防暴力破解（按 IP 计数）
+        adminLoginProtection: {
+            windowMs: 10 * 60 * 1000,      // 统计窗口：10分钟
+            maxAttempts: 8,                // 窗口内最多失败次数
+            lockMs: 15 * 60 * 1000,        // 触发后锁定时长：15分钟
+            minDelayMs: 150,               // 失败最小延迟
+            maxDelayMs: 1200               // 失败最大延迟（指数退避上限）
         }
     },
     storage: {
@@ -352,17 +359,13 @@ function ensureKvKeyFromFile(filePath, key, defaultValue) {
     const dv = JSON.stringify(defaultValue ?? null);
     withDbTransactionSync(() => dbSetJsonText(key, dv));
 }
-
-// 初始化 SQLite
 initSqliteKv();
 
 function withFileLockSync(_filePath, fn) {
-    // 已弃用文件锁：全部由 SQLite 事务保证一致性
     return withDbTransactionSync(fn);
 }
 
 function withMultiFileLocksSync(_filePaths, fn) {
-    // 已弃用文件锁：全部由 SQLite 事务保证一致性
     return withDbTransactionSync(fn);
 }
 
@@ -374,7 +377,6 @@ function readJsonSafeSync(filePath, defaultValue) {
         if (!raw) return defaultValue;
         return JSON.parse(raw);
     } catch (e) {
-        // 关键改动：读取/解析异常必须抛出，阻止后续写入流程（避免用默认值覆盖坏数据）
         const err = new Error(`READ_JSON_FAILED: ${filePath}: ${e && e.message ? e.message : String(e)}`);
         try { err.cause = e; } catch (_) { /* ignore */ }
         throw err;
@@ -392,7 +394,6 @@ function writeTextAtomicSync(filePath, text) {
 function writeJsonAtomicSync(filePath, obj, indent = 2) {
     const key = dbPathToKey.get(filePath);
     if (!DB || !key) {
-        // 已弃用 JSON 文件存储：除必要文件外，禁止落盘
         throw new Error(`JSON_FILE_STORAGE_DISABLED: ${filePath}`);
     }
     const text = JSON.stringify(obj, null, indent);
@@ -400,24 +401,28 @@ function writeJsonAtomicSync(filePath, obj, indent = 2) {
 }
 
 function writeJsonAtomicLockedSync(filePath, obj, indent = 2) {
-    // 已弃用文件锁：直接复用 SQLite 事务
     return writeJsonAtomicSync(filePath, obj, indent);
 }
 
-// -------------------- 时区日期工具（按固定 UTC offset 计算 YYYY-MM-DD） --------------------
 function getISODateInOffsetHours(offsetHours, ms = Date.now()) {
     const offsetMs = Number(offsetHours || 0) * 60 * 60 * 1000;
-    // ms 本身就是 UTC epoch 毫秒数；直接加固定 offset 后取 ISO 日期即可
     const d = new Date(ms + offsetMs);
     return d.toISOString().slice(0, 10);
 }
-
-// -------------------- 基础输入校验 --------------------
 function isValidMinecraftName(name) {
     return typeof name === 'string' && /^[A-Za-z0-9_]{3,16}$/.test(name);
 }
 
-const UUID_SCRIPT_PATH = path.join(__dirname, 'getUuid.py');
+function nameToOfflineUuid(name) {
+    const buf = crypto.createHash('md5').update(`OfflinePlayer:${name}`, 'utf8').digest();
+    // version 3
+    buf[6] = (buf[6] & 0x0f) | 0x30;
+    // RFC4122 variant
+    buf[8] = (buf[8] & 0x3f) | 0x80;
+    const hex = buf.toString('hex');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 // -------------------- 配置加载结束 --------------------
 
 const playerSessions = new Map();
@@ -425,12 +430,10 @@ const webSessions = new Map();
 const sub_process = require('child_process');
 const { promisify } = require('util');
 const exec = promisify(sub_process.exec);
-const execFileAsync = promisify(sub_process.execFile);
 const nodemailer = require('nodemailer');
 const speakeasy = require('speakeasy');
 const bodyParser = require('body-parser');
 const EMAIL_LOGO_URL = config.email.logoUrl;
-const whitelistFile = resolveMaybeRelativePath(config.files.whitelist);
 const whitedataFile = resolveMaybeRelativePath(config.files.whitedata);
 const signDataFile = resolveMaybeRelativePath(config.files.signData);
 const shopItemsFile = resolveMaybeRelativePath(config.files.shopItems);
@@ -448,8 +451,7 @@ try {
     console.error("初始化 SQLite KV 映射失败:", e);
 }
 
-// -------------------- 用户存在性缓存（用于删除用户后立即失效 session） --------------------
-const userExistCache = new Map(); // username -> { ok: boolean, expire: number }
+const userExistCache = new Map(); 
 const USER_EXIST_CACHE_TTL_MS = 5000;
 
 function userExistsCached(username) {
@@ -529,9 +531,42 @@ const STATUS_APIS = [
 ];
 // 创建Express应用
 const app = express();
-app.use(bodyParser.json({ limit: config.http.bodyLimit }));
 
-// -------------------- 响应大小限制（避免超大响应导致资源消耗） --------------------
+// --------- 请求体大小：避免 base64(dataURL) 头像导致 http.bodyLimit 与 maxAvatarBytes 不匹配 ---------
+function parseByteSize(input, fallbackBytes = 10 * 1024 * 1024) {
+    if (typeof input === 'number' && Number.isFinite(input) && input > 0) return Math.floor(input);
+    const s = String(input || '').trim().toLowerCase();
+    const m = /^(\d+(?:\.\d+)?)\s*(b|kb|kib|mb|mib|gb|gib)?$/.exec(s);
+    if (!m) return fallbackBytes;
+    const n = Number.parseFloat(m[1]);
+    if (!Number.isFinite(n) || n <= 0) return fallbackBytes;
+    const unit = m[2] || 'b';
+    const mul = ({
+        b: 1,
+        kb: 1000,
+        kib: 1024,
+        mb: 1000 * 1000,
+        mib: 1024 * 1024,
+        gb: 1000 * 1000 * 1000,
+        gib: 1024 * 1024 * 1024
+    })[unit] || 1;
+    return Math.floor(n * mul);
+}
+
+const BODY_LIMIT_BYTES_CFG = parseByteSize(config?.http?.bodyLimit, 10 * 1024 * 1024);
+// 对于 dataURL(base64) 上传：payload ≈ fileBytes * 4/3 + 少量 JSON/字段开销
+const AVATAR_NEED_BODY_BYTES = Math.ceil((Number(config?.storage?.maxAvatarBytes) || (10 * 1024 * 1024)) * 4 / 3) + (64 * 1024);
+const BODY_LIMIT_BYTES = Math.max(BODY_LIMIT_BYTES_CFG, AVATAR_NEED_BODY_BYTES);
+if (BODY_LIMIT_BYTES > BODY_LIMIT_BYTES_CFG) {
+    console.warn(`配置 http.bodyLimit=${config?.http?.bodyLimit} 可能过小，已在运行时提升到 ${BODY_LIMIT_BYTES} bytes，以兼容头像上传。`);
+}
+// 供前端做一致性校验：在 BODY_LIMIT 下，最大可安全上传的原始图片字节数
+const EFFECTIVE_MAX_AVATAR_BYTES = Math.min(
+    Number(config?.storage?.maxAvatarBytes) || (10 * 1024 * 1024),
+    Math.max(0, Math.floor((BODY_LIMIT_BYTES - (64 * 1024)) * 3 / 4))
+);
+
+app.use(bodyParser.json({ limit: BODY_LIMIT_BYTES }));
 const RESPONSE_LIMIT_BYTES = (() => {
     const v = Number(config?.http?.responseLimitBytes);
     return Number.isFinite(v) && v > 0 ? v : (20 * 1024 * 1024);
@@ -563,8 +598,6 @@ app.use((req, res, next) => {
         if (!chunk) return 0;
         return Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk, encoding || 'utf8');
     }
-
-    // 兜底：拦截所有 write/end（包括静态文件流）并累计输出字节数
     res.write = function (chunk, encoding, cb) {
         if (killed) return false;
         const len = chunkLen(chunk, encoding);
@@ -579,8 +612,6 @@ app.use((req, res, next) => {
         sentBytes += len;
         return origEnd(chunk, encoding, cb);
     };
-
-    // 包装 res.json：先 stringify 再检查大小（可在发送前提前拦截）
     res.json = function (body) {
         let text;
         try {
@@ -592,8 +623,6 @@ app.use((req, res, next) => {
         try { res.setHeader('Content-Type', 'application/json; charset=utf-8'); } catch (_) { /* ignore */ }
         return origSend(text);
     };
-
-    // 包装 res.send：对 object 转为 json，其它直接检查
     res.send = function (body) {
         if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
             return res.json(body);
@@ -605,7 +634,23 @@ app.use((req, res, next) => {
     next();
 });
 
-app.use(express.static(path.join(__dirname, config.http.staticDir))); // 使用静态目录public
+app.use(express.static(path.join(__dirname, config.http.staticDir)));
+
+// 前端可读取的公开配置（避免前后端限制不一致）
+app.get('/api/publicConfig', (req, res) => {
+    return res.json({
+        success: true,
+        limits: {
+            // 在当前 http.bodyLimit 下，前端应使用的实际上传限制
+            maxAvatarBytes: EFFECTIVE_MAX_AVATAR_BYTES,
+            // 配置文件中的上限（便于排查）
+            configuredMaxAvatarBytes: Number(config?.storage?.maxAvatarBytes) || (10 * 1024 * 1024),
+            bodyLimitBytes: BODY_LIMIT_BYTES
+        }
+    });
+});
+
+ 
 
 const maxOnlineTime = config.game.maxOnlineTimeMs;
 const onlineMode = config.game.onlineMode;
@@ -636,18 +681,6 @@ if (ADMIN) {
 // -------------------- 管理员配置结束 --------------------
 
 
-// 确保whitelist.json文件存在并初始化
-if (!fs.existsSync(whitelistFile)) {
-    fs.writeFileSync(whitelistFile, "[]");
-    console.log(`已创建空白名单文件: ${whitelistFile}`);
-}
-
-// whitelist.json 属于 Minecraft 服务器的必要文件：数据库为主，文件为派生输出（不再作为存储）
-function writeWhitelistFileAtomic(list) {
-    const arr = Array.isArray(list) ? list : [];
-    const text = JSON.stringify(arr, null, 0);
-    writeTextAtomicSync(whitelistFile, text);
-}
 
 // 邮件配置
 const transporter = nodemailer.createTransport({
@@ -663,6 +696,85 @@ const transporter = nodemailer.createTransport({
 // 验证码存储
 const verificationCodes = new Map();
 const adminSessions = new Map();
+
+// 管理员登录暴力破解防护（内存级：按 IP 计数；重启会清空）
+const adminLoginAttempts = new Map();
+
+function normalizePositiveInt(v, fallback) {
+    const n = Number(v);
+    return (Number.isFinite(n) && n > 0) ? Math.floor(n) : fallback;
+}
+
+function getAdminLoginProtectionCfg() {
+    const c = (config && config.security && (config.security.adminLoginProtection || config.security.adminLoginRateLimit)) || {};
+    return {
+        windowMs: normalizePositiveInt(c.windowMs, 10 * 60 * 1000),
+        maxAttempts: normalizePositiveInt(c.maxAttempts, 8),
+        lockMs: normalizePositiveInt(c.lockMs, 15 * 60 * 1000),
+        minDelayMs: normalizePositiveInt(c.minDelayMs, 150),
+        maxDelayMs: normalizePositiveInt(c.maxDelayMs, 1200),
+    };
+}
+
+function getAdminLoginKey(req) {
+    const fp = getClientFingerprint(req);
+    const ip = (fp && fp.ip) ? String(fp.ip) : 'unknown';
+    return `adminLogin:${ip}`;
+}
+
+function getOrInitAdminAttemptState(key, cfg) {
+    const now = Date.now();
+    let st = adminLoginAttempts.get(key);
+    if (!st) {
+        st = { count: 0, windowStart: now, lockUntil: 0, expire: now + cfg.windowMs + 1000 };
+        adminLoginAttempts.set(key, st);
+        return st;
+    }
+    if (!st.windowStart || (st.windowStart + cfg.windowMs) < now) {
+        st.count = 0;
+        st.windowStart = now;
+        st.lockUntil = 0;
+    }
+    st.expire = Math.max(st.lockUntil || 0, (st.windowStart || now) + cfg.windowMs) + 1000;
+    adminLoginAttempts.set(key, st);
+    return st;
+}
+
+function checkAdminLoginBlocked(key, cfg) {
+    const now = Date.now();
+    const st = getOrInitAdminAttemptState(key, cfg);
+    if (st.lockUntil && st.lockUntil > now) {
+        return { blocked: true, retryAfterMs: st.lockUntil - now, state: st };
+    }
+    return { blocked: false, retryAfterMs: 0, state: st };
+}
+
+function recordAdminLoginFailure(key, cfg) {
+    const now = Date.now();
+    const st = getOrInitAdminAttemptState(key, cfg);
+    st.count = (Number(st.count) || 0) + 1;
+    if (st.count >= cfg.maxAttempts) {
+        st.lockUntil = now + cfg.lockMs;
+    }
+    st.expire = Math.max(st.lockUntil || 0, (st.windowStart || now) + cfg.windowMs) + 1000;
+    adminLoginAttempts.set(key, st);
+    return st;
+}
+
+function clearAdminLoginFailures(key) {
+    adminLoginAttempts.delete(key);
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function calcFailureDelayMs(failCount, cfg) {
+    const c = Math.max(1, Number(failCount) || 1);
+    const exp = cfg.minDelayMs * Math.pow(2, Math.min(c, 6) - 1);
+    const base = Math.min(cfg.maxDelayMs, exp);
+    return base + Math.floor(Math.random() * 80);
+}
 
 function pruneMapByExpire(map, field = 'expire') {
     const now = Date.now();
@@ -706,17 +818,15 @@ function purgeSessionsForUser(username, email) {
     }
 }
 
-// -------------------- 会话/验证码清理机制（避免 Map 无限增长） --------------------
 const SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
 setInterval(() => {
     try {
         pruneMapByExpire(verificationCodes, 'expire');
         pruneMapByExpire(webSessions, 'expire');
         pruneMapByExpire(adminSessions, 'expire');
+        pruneMapByExpire(adminLoginAttempts, 'expire');
         pruneMapByExpire(userExistCache, 'expire');
-
-        // 玩家会话计时残留：离线且超过 maxOnlineTime 的，直接丢弃
-        const now = Date.now();
+const now = Date.now();
         const ttl = Number(config?.game?.maxOnlineTimeMs) || (1000 * 60 * 60);
         for (const [name, loginAt] of playerSessions.entries()) {
             if (typeof loginAt !== 'number') {
@@ -903,23 +1013,15 @@ async function getUuid(name) {
                 console.log("获取UUID失败：用户名不合法");
                 return null;
             }
-            const { stdout, stderr } = await execFileAsync('python', [UUID_SCRIPT_PATH, name], { windowsHide: true });
-            if (stderr) {
-                console.log("获取UUID失败，请确认python和getUuid.py文件是否存在: " + stderr);
-                return null;
-            }
-            const uuid = String(stdout || '').trim();
-            if (!uuid) {
-                console.log("获取UUID失败：脚本未返回UUID");
-                return null;
-            }
+            const uuid = nameToOfflineUuid(name);
             loger(`玩家 ${name} 的UUID：${uuid}`);
             return uuid;
         } catch (error) {
-            console.error("执行命令时出错: " + error);
+            console.error("生成UUID时出错: " + error);
             return null;
         }
     }
+
 
 }
 
@@ -960,7 +1062,7 @@ setInterval(() => {
 
             // 注意：必须在删除 onlinePlayer 之前获取 loginTime，否则可能导致 sessionTime=0
             const loginTime = (value && typeof value.loginTime === 'number') ? value.loginTime : getPlayerLoginTime(key);
-            const sessionTime = Math.max(0, Date.now() - loginTime);
+            const sessionTime = (typeof loginTime === 'number') ? Math.max(0, Date.now() - loginTime) : 0;
 
             // 自动登出时更新在线时长（仅在确实有会话时累计）
             try {
@@ -990,21 +1092,7 @@ setInterval(() => {
         }
     });
     if (haveChange) {
-        let temp = [];
-        onlinePlayer.forEach((value, key) => {
-            temp.push({
-                name: key,
-                uuid: value.uuid
-            });
-        });
-        try {
-            writeWhitelistFileAtomic(temp);
-            console.log(`白名单文件已写入 ${new Date().toLocaleTimeString()}`);
-        } catch (err) {
-            console.error(`白名单文件写入失败，请检查权限和文件位置 ${new Date().toLocaleTimeString()} ：${err}`);
-        } finally {
-            haveChange = false;
-        }
+        haveChange = false;
     }
 }, 1000);
 
@@ -1072,7 +1160,7 @@ app.post('/api/uploadAvatar', async (req, res) => {
 
     const base64Data = m[1];
     const estimatedBytes = Math.ceil(base64Data.length * 3 / 4);
-    if (estimatedBytes > config.storage.maxAvatarBytes) {
+    if (estimatedBytes > EFFECTIVE_MAX_AVATAR_BYTES) {
         return res.status(400).json({ success: false, message: '头像图片过大，请压缩后上传' });
     }
 
@@ -1082,7 +1170,7 @@ app.post('/api/uploadAvatar', async (req, res) => {
     } catch (_) {
         return res.status(400).json({ success: false, message: '头像数据不合法' });
     }
-    if (!buffer || buffer.length === 0 || buffer.length > config.storage.maxAvatarBytes) {
+    if (!buffer || buffer.length === 0 || buffer.length > EFFECTIVE_MAX_AVATAR_BYTES) {
         return res.status(400).json({ success: false, message: '头像数据不合法或过大' });
     }
 
@@ -1421,7 +1509,18 @@ app.get('/api/userInfo', (req, res) => {
         // 添加：检查服务器登录状态
         const serverStatus = onlinePlayer.has(username) ? "online" : "offline";
         // 从用户数据中提取所需信息
-        const { points, joinDate, onlineTime, lastLogin } = user;
+        let points = user.points;
+        // 积分以 signData 为准（兼容旧数据 points 缺失/不一致）
+        try {
+            const signData = readJsonSafeSync(signDataFile, {});
+            if (signData && signData[username] && signData[username].points !== undefined) {
+                points = signData[username].points;
+            }
+        } catch (_) { }
+        points = parseInt(points, 10);
+        if (!Number.isFinite(points)) points = 0;
+
+        const { joinDate, onlineTime, lastLogin } = user;
         res.json({
             success: true,
             points,
@@ -1581,7 +1680,8 @@ app.get('/api/signHistory', (req, res) => {
             signHistory: userData.signHistory || {},
             consecutiveDays: userData.consecutiveDays || 0,
             totalDays: userData.totalDays || 0,
-            points: userData.points || 0 // 添加积分字段
+            points: userData.points || 0,
+            lastSign: userData.lastSign || ""
         });
     } catch (error) {
         console.error("获取签到历史错误:", error);
@@ -1590,13 +1690,19 @@ app.get('/api/signHistory', (req, res) => {
 });
 // 在文件顶部添加辅助函数
 function getPlayerLoginTime(name) {
+    // 仅返回“真正开始统计”的会话起点：
+    // - 玩家点击网页“登录服务器”只是授权，不应开始计时（loginTime 可能为 null）
+    // - 插件 /check 或 /login 通过后才会写入 loginTime / playerSessions
     if (playerSessions.has(name)) {
-        return playerSessions.get(name);
+        const t = playerSessions.get(name);
+        if (typeof t === 'number') return t;
     }
     if (onlinePlayer.has(name)) {
-        return onlinePlayer.get(name).loginTime;
+        const rec = onlinePlayer.get(name);
+        const t = rec && rec.loginTime;
+        if (typeof t === 'number') return t;
     }
-    return Date.now(); // 默认返回当前时间
+    return null;
 }
 // 在文件顶部添加日期格式化函数
 function formatDate(date) {
@@ -1616,11 +1722,19 @@ function writeCouponsFile(data) {
     writeJsonAtomicSync(couponsFile, Array.isArray(data) ? data : [], 2);
     return true;
 }
-// API请求处理
-
-// 安全：管理员登录改为 POST /api/adminLogin，避免密码/TOTP出现在URL中
 app.post('/api/adminLogin', async (req, res) => {
     const p = Object.assign({}, req.body || {});
+
+    // 防暴力破解：先按 IP 做限流/锁定（避免被用来爆破密码/TOTP）
+    const cfg = getAdminLoginProtectionCfg();
+    const key = getAdminLoginKey(req);
+    const pre = checkAdminLoginBlocked(key, cfg);
+    if (pre.blocked) {
+        const sec = Math.ceil(pre.retryAfterMs / 1000);
+        try { res.setHeader('Retry-After', String(sec)); } catch (_) { /* ignore */ }
+        return res.status(429).json({ success: false, message: `尝试次数过多，请在 ${sec} 秒后再试` });
+    }
+
     if (!p.name || !p.passwd || !p.totp) {
         return res.status(400).json({ success: false, message: "参数不完整" });
     }
@@ -1635,18 +1749,38 @@ app.post('/api/adminLogin', async (req, res) => {
             : (String(p.passwd) === String(adminData.password));
 
         if (p.name !== adminData.username || !passwordOk) {
+            const st = recordAdminLoginFailure(key, cfg);
+            await sleep(calcFailureDelayMs(st.count, cfg));
+
+            const blockedNow = checkAdminLoginBlocked(key, cfg);
+            if (blockedNow.blocked) {
+                const sec = Math.ceil(blockedNow.retryAfterMs / 1000);
+                try { res.setHeader('Retry-After', String(sec)); } catch (_) { /* ignore */ }
+                return res.status(429).json({ success: false, message: `尝试次数过多，请在 ${sec} 秒后再试` });
+            }
             return res.json({ success: false, message: "管理员账号或密码错误" });
         }
 
         // 验证TOTP
         const verified = verifyTOTP(p.totp, adminData.totpSecret);
         if (!verified) {
+            const st = recordAdminLoginFailure(key, cfg);
+            await sleep(calcFailureDelayMs(st.count, cfg));
+
+            const blockedNow = checkAdminLoginBlocked(key, cfg);
+            if (blockedNow.blocked) {
+                const sec = Math.ceil(blockedNow.retryAfterMs / 1000);
+                try { res.setHeader('Retry-After', String(sec)); } catch (_) { /* ignore */ }
+                return res.status(429).json({ success: false, message: `尝试次数过多，请在 ${sec} 秒后再试` });
+            }
             return res.json({ success: false, message: "TOTP验证码错误" });
         }
 
+        // 登录成功：清空失败计数
+        clearAdminLoginFailures(key);
+
         // 创建管理员session
         const sessionId = generateSessionId();
-        const fp = getClientFingerprint(req);
         const bindCfg = (config.security && config.security.sessionBinding && config.security.sessionBinding.admin) || { ip: false, ua: false };
         adminSessions.set(sessionId, {
             createdAt: Date.now(),
@@ -1661,6 +1795,7 @@ app.post('/api/adminLogin', async (req, res) => {
         return res.json({ success: false, message: "管理员登录失败: " + error.message });
     }
 });
+
 
 app.all('/api', async (req, res) => {
     const p = Object.assign({}, req.query || {}, req.body || {});
@@ -2128,6 +2263,11 @@ app.all('/api', async (req, res) => {
             // 从请求体中获取参数
             const { type, items, expiresAt, designatedPlayer, oneTimeUse } = req.body;
 
+            // 关键修复：expiresAt 可能为空/非法，避免 Invalid time value
+            const exp = new Date(expiresAt);
+            if (!expiresAt || Number.isNaN(exp.getTime())) {
+                return res.json({ success: false, message: "expiresAt 不合法" });
+            }
             // 读取兑换码数据
             const coupons = readJsonSafeSync(couponsFile, []);
 
@@ -2140,7 +2280,7 @@ app.all('/api', async (req, res) => {
                 type, // 类型：item 或 bundle
                 items, // 物品数组 [{itemId, amount}]
                 designatedPlayer: designatedPlayer || null,
-                expiresAt: new Date(expiresAt).toISOString(),
+                expiresAt: exp.toISOString(),
                 oneTimeUse: (oneTimeUse === true || oneTimeUse === "true"),
                 createdAt: new Date().toISOString(),
                 used: false,
@@ -2171,13 +2311,18 @@ app.all('/api', async (req, res) => {
 
         try {
             const coupons = readCouponsFile();
-            const couponIndex = coupons.findIndex(c => c.code === p.code);
+            // 关键修复：兑换码统一按不区分大小写匹配
+            const code = String(p.code || '').trim().toUpperCase();
+            const couponIndex = coupons.findIndex(c => String(c.code || '').toUpperCase() === code);
 
             if (couponIndex === -1) {
                 return res.json({ success: false, message: "兑换码无效" });
             }
 
             const coupon = coupons[couponIndex];
+            // 关键修复：兼容旧数据 usedBy 缺失或非数组
+            if (!Array.isArray(coupon.usedBy)) coupon.usedBy = [];
+
             const now = new Date();
 
             // 检查是否过期
@@ -2230,7 +2375,7 @@ app.all('/api', async (req, res) => {
             const enhancedCoupons = coupons.map(coupon => {
                 return {
                     ...coupon,
-                    usedBy: coupon.usedBy || []
+                    usedBy: Array.isArray(coupon.usedBy) ? coupon.usedBy : []
                 };
             });
             return res.json({ success: true, coupons: enhancedCoupons });
@@ -2343,7 +2488,9 @@ app.all('/api', async (req, res) => {
                     onlinePlayer.set(p.name, {
                         uuid: player.uuid,
                         name: player.name,
-                        loginTime: Date.now(),
+                        // 这里仅表示“授权进入”（供插件 /check 判断），不应从此刻开始统计在线时长
+                        loginTime: null,
+                        authorizedAt: Date.now(),
                         onlineTime: Date.now() + onlineTime
                     });
                     haveChange = true;
@@ -2523,7 +2670,16 @@ app.all('/api', async (req, res) => {
             // 修复：使用正确的文件路径
             writeJsonAtomicLockedSync(whitedataFile, players, 0);
 
-            // 仅在成功注册后删除验证码
+            
+// 注册成功后：刷新存在性缓存（避免 5 秒 TTL 造成“刚注册就被判定不存在”）
+try {
+    const uname = String(record.name || '').trim();
+    if (uname) {
+        userExistCache.set(uname, { ok: true, expire: Date.now() + USER_EXIST_CACHE_TTL_MS });
+    }
+} catch (_) { /* ignore */ }
+
+// 仅在成功注册后删除验证码
             verificationCodes.delete(p.email);
 
             return res.json({
@@ -2553,7 +2709,7 @@ app.all('/api', async (req, res) => {
             const loginTime = (onlinePlayer.has(p.name) && onlinePlayer.get(p.name) && typeof onlinePlayer.get(p.name).loginTime === 'number')
                 ? onlinePlayer.get(p.name).loginTime
                 : getPlayerLoginTime(p.name);
-            const sessionTime = isOnline ? Math.max(0, now - loginTime) : 0;
+            const sessionTime = (isOnline && typeof loginTime === 'number') ? Math.max(0, now - loginTime) : 0;
 
             const players = readJsonSafeSync(whitedataFile, []);
             const player = players.find(player => player && player.name === p.name);
@@ -2710,30 +2866,67 @@ function startHttpServers() {
             }
             if (req.url.slice(0, 7) == "/check/") {
                 loger(`<插件操作> IP: ${remote} 访问了 查询玩家是否允许进入`);
-                let name = req.url.slice(7);
-                if (onlinePlayer.has(name)) {
-                    res.writeHead(200);
+                const name = req.url.slice(7);
+
+                if (!name || name.trim() === "") {
+                    res.writeHead(400);
                     res.end();
                     return;
-                } else {
+                }
+
+                if (!onlinePlayer.has(name)) {
                     res.writeHead(404);
                     res.end();
                     return;
                 }
+
+                const now = Date.now();
+                const rec = onlinePlayer.get(name);
+
+                // 授权超时（或脏数据）则拒绝
+                if (!rec || typeof rec.onlineTime !== 'number' || rec.onlineTime <= now) {
+                    if (onlinePlayer.has(name)) onlinePlayer.delete(name);
+                    if (playerSessions.has(name)) playerSessions.delete(name);
+                    haveChange = true;
+                    queryChange = true;
+                    res.writeHead(404);
+                    res.end();
+                    return;
+                }
+
+                if (typeof rec.loginTime !== 'number') {
+                    rec.loginTime = now;
+                    playerSessions.set(name, now);
+                    onlinePlayer.set(name, rec);
+                    loger(`[计时开始] 玩家 ${name} 已通过插件 /check 放行，开始统计在线时长`);
+                } else if (!playerSessions.has(name)) {
+                    playerSessions.set(name, rec.loginTime);
+                }
+
+                res.writeHead(200);
+                res.end();
+                return;
             }
             if (req.url.slice(0, 7) == "/login/") {
                 loger(`<插件操作> IP: ${remote} 访问了 登录玩家`);
                 let name = req.url.slice(7);
                 try {
                     const players = readJsonSafeSync(whitedataFile, []);
-
-                    // 若已在线：仅延长有效期，不重置 loginTime（避免少算在线时长）
                     if (onlinePlayer.has(name)) {
-                        const rec = onlinePlayer.get(name);
-                        if (rec && typeof rec.loginTime === 'number' && !playerSessions.has(name)) {
+                        const now = Date.now();
+                        const rec = onlinePlayer.get(name) || {};
+                        if (typeof rec.loginTime !== 'number') {
+                            rec.loginTime = now;
+                            playerSessions.set(name, now);
+                            loger(`[计时开始] 玩家 ${name} 已通过插件 /login 确认，开始统计在线时长`);
+                        } else if (!playerSessions.has(name)) {
                             playerSessions.set(name, rec.loginTime);
                         }
-                        onlinePlayer.get(name).onlineTime = Date.now() + maxOnlineTime;
+
+                        // 延长有效期
+                        rec.onlineTime = now + maxOnlineTime;
+                        onlinePlayer.set(name, rec);
+
                         res.writeHead(200);
                         res.end();
                         return;
@@ -2779,10 +2972,8 @@ function startHttpServers() {
                 const wasOnline = onlinePlayer.has(name) || playerSessions.has(name);
                 const loginTime = (onlinePlayer.has(name) && onlinePlayer.get(name) && typeof onlinePlayer.get(name).loginTime === 'number')
                     ? onlinePlayer.get(name).loginTime
-                    : (playerSessions.has(name) ? playerSessions.get(name) : now);
-                const sessionTime = wasOnline ? Math.max(0, now - loginTime) : 0;
-
-                // 仅在玩家确实在线时累计在线时长，避免离线调用 /logout 造成误计
+                    : (playerSessions.has(name) ? playerSessions.get(name) : null);
+                const sessionTime = (wasOnline && typeof loginTime === 'number') ? Math.max(0, now - loginTime) : 0;
                 if (wasOnline && sessionTime > 0) {
                     try {
                         withDbTransactionSync(() => {

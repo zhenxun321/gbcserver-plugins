@@ -5242,12 +5242,26 @@
 
 
             // 头像上传
+            // 从后端读取限制，避免“前端允许但后端拒绝/或反之”的不一致
+            window.__avatarMaxBytes = window.__avatarMaxBytes || (9 * 1024 * 1024); // 兜底值
+            (function syncAvatarLimit() {
+                fetch('/api/publicConfig')
+                    .then(r => r.json())
+                    .then(cfg => {
+                        const v = cfg && cfg.success && cfg.limits && cfg.limits.maxAvatarBytes;
+                        if (typeof v === 'number' && v > 0) window.__avatarMaxBytes = v;
+                    })
+                    .catch(() => { /* ignore */ });
+            })();
+
             document.getElementById('avatar-input').addEventListener('change', function (e) {
                 const file = e.target.files[0];
                 if (!file) return;
-                // 检查文件大小 (限制为 9MB)
-                if (file.size > 9 * 1024 * 1024) {
-                    showNotification('头像图片不能超过9MB', 'error');
+
+                const limit = window.__avatarMaxBytes || (9 * 1024 * 1024);
+                if (file.size > limit) {
+                    const mb = (limit / (1024 * 1024));
+                    showNotification(`头像图片不能超过${mb.toFixed(mb >= 10 ? 0 : 1)}MB`, 'error');
                     this.value = ''; // 清空文件选择
                     return;
                 }
@@ -5274,9 +5288,10 @@
                                 document.getElementById('user-avatar-img').src = data.avatarUrl;
                                 showNotification('头像更新成功！');
                             } else {
-                                showNotification('头像上传失败', 'error');
+                                showNotification(data.message || '头像上传失败', 'error');
                             }
-                        });
+                        })
+                        .catch(() => showNotification('头像上传失败', 'error'));
                 };
                 reader.readAsDataURL(file);
             });
