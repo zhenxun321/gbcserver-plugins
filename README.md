@@ -33,6 +33,7 @@
 ## 运行环境
 
 - Node.js **建议 18+**（代码使用了 `fetch`、`AbortSignal.timeout` 等特性）
+- SQLite 引擎：使用 **better-sqlite3**（原生模块，安装时可能需要编译工具/构建环境）
 - Python **可选**（当 `game.onlineMode=false` 时，会调用 `python getUuid.py <name>` 获取 UUID）
 - 邮件 SMTP（用于发送验证码）
 - Linux/Windows/macOS 均可运行（注意端口权限）
@@ -47,12 +48,14 @@
 
 ```bash
 npm init -y
-npm i express body-parser nodemailer speakeasy
+npm i express body-parser nodemailer speakeasy better-sqlite3
 ```
 
 ---
 
 ### 2) 首次启动生成配置
+
+> 入口文件是 `whiteHitBlack.js`。
 
 直接启动：
 
@@ -100,6 +103,7 @@ node whiteHitBlack.js
   },
   "http": {
     "bodyLimit": "10mb",
+    "responseLimitBytes": 20971520,
     "staticDir": "public",
     "httpPort": 3000,
     "httpsPort": 3443,
@@ -145,6 +149,7 @@ node whiteHitBlack.js
   "storage": {
     "avatarsDir": "avatars",
     "maxAvatarBytes": 10485760,
+    "databasePath": "data.sqlite",
     "portsFile": "ports.json"
   },
   "webhook": {
@@ -179,6 +184,8 @@ node whiteHitBlack.js
 ### 配置项说明
 
 #### `http`
+- `bodyLimit`：请求体大小限制（例如 `10mb`）
+- `responseLimitBytes`：响应体大小上限（字节），默认 `20971520`（20MB）；超出会中止输出并返回错误
 - `staticDir`：静态资源目录（默认 `public`，用于前端静态页面/图片等）
 - `httpPort`：HTTP 端口（80 需要 root/管理员权限；开发建议改为 3000/8080）
 - `httpsPort`：HTTPS 端口（443 同理）
@@ -203,6 +210,12 @@ node whiteHitBlack.js
 - `verificationCodeTtlMs`：邮箱验证码有效期（默认 5 分钟）
 - `adminSessionTtlMs` / `webSessionTtlMs`：会话过期时间
 - `sessionBinding`：是否绑定 IP / UA（更安全，但反代/网络变化可能导致误判）
+
+#### `storage`
+- `databasePath`：SQLite 数据库文件路径（默认 `data.sqlite`）
+- `avatarsDir`：头像上传存储目录
+- `maxAvatarBytes`：单个头像最大字节数
+- `portsFile`：端口覆盖配置文件（JSON）
 
 #### `status`
 服务器状态检测 API 使用多个第三方接口轮询，返回最快成功结果并缓存。  
@@ -243,16 +256,15 @@ node whiteHitBlack.js
 
 程序会自动创建缺失的数据文件（首次启动很常见）：
 
-- `whitedata.json`：用户数据库（数组）
+- `data.sqlite`：SQLite 数据库（better-sqlite3，默认 WAL 模式），包含用户/签到/商城/兑换码等核心数据
 - `whitelist.json`：白名单输出文件（数组）
-- `signData.json`：签到/积分数据（对象）
-- `shopItems.json`：商品列表（数组）
-- `coupons.json`：兑换码列表（数组）
 - `ports.json`：端口覆盖配置（对象）
 - `avatars/`：头像上传存储目录
 - `public/`：静态资源目录（手动）
 
-> 注意：这些文件路径由 `config.files.*`、`config.storage.*` 控制，支持相对/绝对路径；相对路径默认相对项目根目录。
+> 兼容迁移：若检测到旧的 `whitedata.json` / `signData.json` / `shopItems.json` / `coupons.json` 且数据库内对应数据不存在，会自动迁移到 SQLite；迁移后以 SQLite 为准（不再写回这些 JSON 文件）。
+
+> 注意：路径由 `config.files.*`、`config.storage.*` 控制；其中 `config.storage.databasePath` 为数据库文件路径（默认 `data.sqlite`）。
 
 ---
 
@@ -279,10 +291,6 @@ node whiteHitBlack.js
 ---
 
 ## API 接口概览
-
-> 代码里同时存在“REST 风格接口”和“/api 单入口 query method 接口”。
-
-### A. REST 风格接口
 
 - `POST /api/uploadAvatar`  
   body: `{ username, avatar(base64 dataURL) }`  
@@ -321,7 +329,7 @@ node whiteHitBlack.js
 
 ---
 
-### B. `/api` 单入口（query method）
+###  `/api` 单入口（query method）
 
 统一入口：`app.all('/api', ...)`，通过 query 参数 `method=xxx` 选择功能。
 
@@ -380,6 +388,9 @@ node whiteHitBlack.js
 4) 生产环境建议启用 session 绑定（`sessionBinding.admin/web`）  
 5) 建议把数据文件放到可备份路径（例如 `/data/...`），避免误删导致数据丢失
 
+6) 建议保留 `http.bodyLimit` / `http.responseLimitBytes` 的限制，避免超大请求/响应造成资源消耗
+7) 管理员删除用户后会自动清理该用户相关会话残留；同时服务端有定时清理过期 session（默认每 60 秒）
+
 ---
 
 ## 常见问题
@@ -389,6 +400,12 @@ node whiteHitBlack.js
 
 ### Q2：Node 版本低导致 fetch/AbortSignal 报错
 升级到 Node 18+。
+
+### Q2.1：安装 better-sqlite3 失败（node-gyp/编译错误）
+`better-sqlite3` 是原生模块，某些环境需要安装构建工具（例如 Windows 的 VS Build Tools、Python、C/C++ 编译链）。
+
+### Q2.2：以前的 JSON 数据还在吗？会丢吗？
+不会。首次启动时如果发现旧的 `whitedata.json` / `signData.json` / `shopItems.json` / `coupons.json`，且 SQLite 里还没有对应数据，会自动迁移到 `data.sqlite`。迁移后以 SQLite 为准（不会再写回这些 JSON 文件）。
 
 ### Q3：onlineMode=false 时获取 UUID 失败
 你需要提供 `getUuid.py`，并确保服务器安装 Python，且命令 `python getUuid.py <name>` 可执行。
