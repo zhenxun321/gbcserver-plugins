@@ -34,7 +34,6 @@
 
 - Node.js **建议 18+**（代码使用了 `fetch`、`AbortSignal.timeout` 等特性）
 - SQLite 引擎：使用 **better-sqlite3**（原生模块，安装时可能需要编译工具/构建环境）
-- Python **可选**（当 `game.onlineMode=false` 时，会调用 `python getUuid.py <name>` 获取 UUID）
 - 邮件 SMTP（用于发送验证码）
 - Linux/Windows/macOS 均可运行（注意端口权限）
 
@@ -95,7 +94,6 @@ node whiteHitBlack.js
     "logoUrl": "https://image.010831.xyz/gbc/icon.jpg"
   },
   "files": {
-    "whitelist": "whitelist.json",
     "whitedata": "whitedata.json",
     "signData": "signData.json",
     "shopItems": "shopItems.json",
@@ -407,8 +405,5 @@ node whiteHitBlack.js
 ### Q2.2：以前的 JSON 数据还在吗？会丢吗？
 不会。首次启动时如果发现旧的 `whitedata.json` / `signData.json` / `shopItems.json` / `coupons.json`，且 SQLite 里还没有对应数据，会自动迁移到 `data.sqlite`。迁移后以 SQLite 为准（不会再写回这些 JSON 文件）。
 
-### Q3：onlineMode=false 时获取 UUID 失败
-你需要提供 `getUuid.py`，并确保服务器安装 Python，且命令 `python getUuid.py <name>` 可执行。
-
-### Q4：80/443 端口无法监听
+### Q3：80/443 端口无法监听
 Linux 上 1024 以下端口通常需要 root 权限。开发环境建议改用 3000/3443。
