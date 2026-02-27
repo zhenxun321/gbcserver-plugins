@@ -47,7 +47,7 @@
 
 ```bash
 npm init -y
-npm i express body-parser nodemailer speakeasy better-sqlite3
+npm i express body-parser nodemailer speakeasy bcryptjs better-sqlite3
 ```
 
 ---
